@@ -52,10 +52,14 @@ DEVELOPER_USERNAME = "c9aac"
     WAIT_MESSAGE,
     WAIT_GROUP_USERNAME,
     WAIT_PHOTO,
-) = range(10)
+    WAIT_REMOVE_GROUP,
+) = range(11)
 
 user_data_store = {}
 broadcast_tasks = {}
+
+
+MAX_GROUPS = 15
 
 
 def init_user(user_id):
@@ -66,8 +70,7 @@ def init_user(user_id):
             "session_string": None,
             "interval": None,
             "message": None,
-            "group": None,
-            "group_id": None,
+            "groups": [],
             "photo_file_id": None,
         }
 
@@ -77,7 +80,8 @@ def get_main_menu():
         [InlineKeyboardButton("⏱ الوقت بين الرسائل", callback_data="set_interval")],
         [InlineKeyboardButton("📝 الكليشة (نص الرسالة)", callback_data="set_message")],
         [InlineKeyboardButton("🖼 إضافة صورة", callback_data="set_photo")],
-        [InlineKeyboardButton("👥 اختيار المجموعة", callback_data="choose_group")],
+        [InlineKeyboardButton("👥 اختيار المجموعات", callback_data="choose_group")],
+        [InlineKeyboardButton("🗑 إزالة مجموعة", callback_data="remove_group")],
         [InlineKeyboardButton("🔑 إضافة جلسة (Session)", callback_data="add_session")],
         [InlineKeyboardButton("🚀 بدء النشر", callback_data="start_broadcast")],
         [InlineKeyboardButton("⛔ إيقاف النشر", callback_data="stop_broadcast")],
@@ -91,15 +95,19 @@ def get_status(user_id):
     session = "✅" if d.get("session_string") else "❌"
     interval = f"✅ {d.get('interval')} دقيقة" if d.get("interval") else "❌"
     message = "✅ محفوظة" if d.get("message") else "❌"
-    group = f"✅ {d.get('group')}" if d.get("group") else "❌"
     photo = "✅ مضافة" if d.get("photo_file_id") else "❌"
+    groups = d.get("groups", [])
+    if groups:
+        groups_text = f"✅ {len(groups)} مجموعة"
+    else:
+        groups_text = "❌"
     return (
         f"📊 *الحالة الحالية:*\n"
         f"🔑 الجلسة: {session}\n"
         f"⏱ الوقت: {interval}\n"
         f"📝 الكليشة: {message}\n"
         f"🖼 الصورة: {photo}\n"
-        f"👥 المجموعة: {group}"
+        f"👥 المجموعات: {groups_text}"
     )
 
 
@@ -323,7 +331,19 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── زر اختيار المجموعة ──────────────────────────────────────────────────────
+# ─── زر اختيار المجموعات (حتى 15) ───────────────────────────────────────────
+def get_groups_menu():
+    keyboard = [[InlineKeyboardButton("✅ انتهيت من الإضافة", callback_data="done_groups")]]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def groups_list_text(groups):
+    if not groups:
+        return ""
+    lines = "\n".join(f"  {i+1}. {g['name']}" for i, g in enumerate(groups))
+    return f"\n\n📋 *المجموعات المضافة حتى الآن ({len(groups)}/{MAX_GROUPS}):*\n{lines}"
+
+
 async def choose_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -333,12 +353,20 @@ async def choose_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("❌ يجب إضافة جلسة أولاً من زر (إضافة جلسة).")
         return ConversationHandler.END
 
-    await query.message.reply_text(
-        "👥 أرسل يوزرنيم المجموعة التي تريد النشر فيها:\n\n"
-        "مثال: `@mygroup` أو `mygroup`\n\n"
-        "⚠️ يجب أن تكون عضواً في المجموعة.",
-        parse_mode="Markdown",
+    groups = user_data_store[user_id].get("groups", [])
+    existing = groups_list_text(groups)
+    remaining = MAX_GROUPS - len(groups)
+
+    text = (
+        f"👥 أرسل يوزرنيم المجموعة التي تريد إضافتها:\n\n"
+        f"مثال: `@mygroup` أو `mygroup`\n\n"
+        f"⚠️ يجب أن تكون عضواً في المجموعة.\n"
+        f"📌 يمكنك إضافة حتى *{remaining}* مجموعة إضافية."
+        + existing
     )
+
+    markup = get_groups_menu() if groups else None
+    await query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
     return WAIT_GROUP_USERNAME
 
 
@@ -346,6 +374,23 @@ async def receive_group_username(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     username = update.message.text.strip().lstrip("@")
     data = user_data_store[user_id]
+    groups = data.get("groups", [])
+
+    if len(groups) >= MAX_GROUPS:
+        await update.message.reply_text(
+            f"⚠️ وصلت للحد الأقصى ({MAX_GROUPS} مجموعة).",
+            reply_markup=get_main_menu(),
+        )
+        return ConversationHandler.END
+
+    already = [g for g in groups if g["username"] == username]
+    if already:
+        await update.message.reply_text(
+            f"⚠️ المجموعة `@{username}` مضافة مسبقاً. أرسل يوزرنيم آخر:",
+            parse_mode="Markdown",
+            reply_markup=get_groups_menu(),
+        )
+        return WAIT_GROUP_USERNAME
 
     await update.message.reply_text("⏳ جاري التحقق من المجموعة...")
 
@@ -362,26 +407,112 @@ async def receive_group_username(update: Update, context: ContextTypes.DEFAULT_T
         await client.connect()
         entity = await client.get_entity(username)
         group_name = getattr(entity, "title", username)
-        group_id = entity.id
         await client.disconnect()
 
-        user_data_store[user_id]["group"] = group_name
-        user_data_store[user_id]["group_id"] = group_id
-        user_data_store[user_id]["group_username"] = username
+        groups.append({"username": username, "name": group_name})
+        user_data_store[user_id]["groups"] = groups
+
+        remaining = MAX_GROUPS - len(groups)
+
+        if remaining == 0:
+            await update.message.reply_text(
+                f"✅ تمت إضافة *{group_name}*\n\n"
+                f"🎯 وصلت للحد الأقصى ({MAX_GROUPS} مجموعة). سيبدأ النشر في جميعها."
+                + groups_list_text(groups),
+                parse_mode="Markdown",
+                reply_markup=get_main_menu(),
+            )
+            return ConversationHandler.END
 
         await update.message.reply_text(
-            f"✅ تم تحديد المجموعة: *{group_name}*",
+            f"✅ تمت إضافة *{group_name}*\n\n"
+            f"📌 يمكنك إضافة {remaining} مجموعة أخرى، أو اضغط *انتهيت*."
+            + groups_list_text(groups),
             parse_mode="Markdown",
-            reply_markup=get_main_menu(),
+            reply_markup=get_groups_menu(),
         )
-        return ConversationHandler.END
+        return WAIT_GROUP_USERNAME
 
     except Exception as e:
         await update.message.reply_text(
             f"❌ تعذر الوصول للمجموعة: {str(e)}\n\n"
-            "تأكد أنك عضو فيها وأن اليوزرنيم صحيح، ثم أرسله مجدداً:"
+            "تأكد أنك عضو فيها وأن اليوزرنيم صحيح، ثم أرسله مجدداً:",
+            reply_markup=get_groups_menu() if groups else None,
         )
         return WAIT_GROUP_USERNAME
+
+
+async def done_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    groups = user_data_store[user_id].get("groups", [])
+
+    if not groups:
+        await query.message.reply_text("❌ لم تضف أي مجموعة بعد. أرسل يوزرنيم مجموعة:")
+        return WAIT_GROUP_USERNAME
+
+    await query.message.reply_text(
+        f"✅ تم حفظ *{len(groups)}* مجموعة للنشر."
+        + groups_list_text(groups),
+        parse_mode="Markdown",
+        reply_markup=get_main_menu(),
+    )
+    return ConversationHandler.END
+
+
+# ─── زر إزالة مجموعة ─────────────────────────────────────────────────────────
+async def remove_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    groups = user_data_store.get(user_id, {}).get("groups", [])
+
+    if not groups:
+        await query.message.reply_text("ℹ️ لا توجد مجموعات مضافة حتى الآن.")
+        return ConversationHandler.END
+
+    list_text = "\n".join(f"  {i+1}. {g['name']} (@{g['username']})" for i, g in enumerate(groups))
+    await query.message.reply_text(
+        f"🗑 *إزالة مجموعة*\n\n"
+        f"📋 المجموعات الحالية:\n{list_text}\n\n"
+        f"أرسل يوزرنيم المجموعة التي تريد إزالتها:\n"
+        f"مثال: `@mygroup` أو `mygroup`",
+        parse_mode="Markdown",
+    )
+    return WAIT_REMOVE_GROUP
+
+
+async def receive_remove_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.message.text.strip().lstrip("@")
+    groups = user_data_store[user_id].get("groups", [])
+
+    found = [g for g in groups if g["username"] == username]
+    if not found:
+        list_text = "\n".join(f"  {i+1}. @{g['username']}" for i, g in enumerate(groups))
+        await update.message.reply_text(
+            f"❌ المجموعة `@{username}` غير موجودة في قائمتك.\n\n"
+            f"📋 المجموعات المتاحة:\n{list_text}\n\n"
+            f"أرسل يوزرنيم صحيح:",
+            parse_mode="Markdown",
+        )
+        return WAIT_REMOVE_GROUP
+
+    new_groups = [g for g in groups if g["username"] != username]
+    user_data_store[user_id]["groups"] = new_groups
+
+    if new_groups:
+        remaining_text = "\n".join(f"  {i+1}. {g['name']}" for i, g in enumerate(new_groups))
+        msg = (
+            f"✅ تم إزالة `@{username}` من قائمة النشر.\n\n"
+            f"📋 المجموعات المتبقية ({len(new_groups)}):\n{remaining_text}"
+        )
+    else:
+        msg = f"✅ تم إزالة `@{username}`.\n\nلا توجد مجموعات مضافة الآن."
+
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_menu())
+    return ConversationHandler.END
 
 
 # ─── بدء النشر ───────────────────────────────────────────────────────────────
@@ -400,8 +531,8 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         missing.append("الوقت بين الرسائل")
     if not data.get("message"):
         missing.append("نص الرسالة (الكليشة)")
-    if not data.get("group_id"):
-        missing.append("المجموعة")
+    if not data.get("groups"):
+        missing.append("المجموعات")
 
     if missing:
         await query.message.reply_text(
@@ -414,10 +545,12 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ النشر يعمل بالفعل!")
         return ConversationHandler.END
 
+    groups = data["groups"]
+    groups_names = "\n".join(f"  • {g['name']}" for g in groups)
     photo_info = "مع صورة 🖼" if data.get("photo_file_id") else "بدون صورة"
     await query.message.reply_text(
         f"🚀 بدأ النشر!\n\n"
-        f"📍 المجموعة: {data['group']}\n"
+        f"📍 المجموعات ({len(groups)}):\n{groups_names}\n"
         f"⏱ كل: {data['interval']} دقيقة\n"
         f"📝 الرسالة: {str(data['message'])[:50]}\n"
         f"🖼 الصورة: {photo_info}"
@@ -429,7 +562,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["api_id"],
             data["api_hash"],
             data["session_string"],
-            data["group_username"],
+            groups,
             data["message"],
             data["interval"],
             data.get("photo_file_id"),
@@ -455,7 +588,7 @@ async def stop_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── حلقة النشر ──────────────────────────────────────────────────────────────
-async def broadcast_loop(user_id, api_id, api_hash, session, group_username, message, interval_minutes, photo_file_id, context):
+async def broadcast_loop(user_id, api_id, api_hash, session, groups, message, interval_minutes, photo_file_id, context):
     bot = context.application.bot
     interval_seconds = interval_minutes * 60
 
@@ -470,24 +603,28 @@ async def broadcast_loop(user_id, api_id, api_hash, session, group_username, mes
         await client.connect()
 
         while True:
-            try:
-                if photo_file_id:
-                    tg_file = await bot.get_file(photo_file_id)
-                    photo_bytes = await tg_file.download_as_bytearray()
-                    photo_io = io.BytesIO(bytes(photo_bytes))
-                    photo_io.name = "photo.jpg"
-                    await client.send_file(
-                        group_username,
-                        photo_io,
-                        caption=message,
-                    )
-                else:
-                    await client.send_message(group_username, message)
+            success_count = 0
+            fail_count = 0
 
-                await bot.send_message(user_id, "✅ تم إرسال رسالة.")
-            except Exception as e:
-                await bot.send_message(user_id, f"❌ فشل الإرسال: {str(e)}")
+            for group in groups:
+                try:
+                    if photo_file_id:
+                        tg_file = await bot.get_file(photo_file_id)
+                        photo_bytes = await tg_file.download_as_bytearray()
+                        photo_io = io.BytesIO(bytes(photo_bytes))
+                        photo_io.name = "photo.jpg"
+                        await client.send_file(group["username"], photo_io, caption=message)
+                    else:
+                        await client.send_message(group["username"], message)
+                    success_count += 1
+                except Exception as e:
+                    fail_count += 1
+                    await bot.send_message(user_id, f"❌ فشل الإرسال لـ {group['name']}: {str(e)}")
 
+            await bot.send_message(
+                user_id,
+                f"📬 جولة نشر مكتملة:\n✅ نجح: {success_count} | ❌ فشل: {fail_count}"
+            )
             await asyncio.sleep(interval_seconds)
 
     except asyncio.CancelledError:
@@ -517,6 +654,7 @@ def main():
             CallbackQueryHandler(set_message_start, pattern="^set_message$"),
             CallbackQueryHandler(set_photo_start, pattern="^set_photo$"),
             CallbackQueryHandler(choose_group_start, pattern="^choose_group$"),
+            CallbackQueryHandler(remove_group_start, pattern="^remove_group$"),
             CallbackQueryHandler(start_broadcast, pattern="^start_broadcast$"),
             CallbackQueryHandler(stop_broadcast, pattern="^stop_broadcast$"),
             CallbackQueryHandler(developer_info, pattern="^developer$"),
@@ -538,7 +676,11 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message)
             ],
             WAIT_GROUP_USERNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_group_username)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_group_username),
+                CallbackQueryHandler(done_groups, pattern="^done_groups$"),
+            ],
+            WAIT_REMOVE_GROUP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_remove_group),
             ],
             WAIT_PHOTO: [
                 MessageHandler(filters.PHOTO, receive_photo),
@@ -552,6 +694,8 @@ def main():
             CallbackQueryHandler(set_message_start, pattern="^set_message$"),
             CallbackQueryHandler(set_photo_start, pattern="^set_photo$"),
             CallbackQueryHandler(choose_group_start, pattern="^choose_group$"),
+            CallbackQueryHandler(remove_group_start, pattern="^remove_group$"),
+            CallbackQueryHandler(done_groups, pattern="^done_groups$"),
             CallbackQueryHandler(start_broadcast, pattern="^start_broadcast$"),
             CallbackQueryHandler(stop_broadcast, pattern="^stop_broadcast$"),
             CallbackQueryHandler(developer_info, pattern="^developer$"),
