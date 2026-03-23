@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: nashr-bot
-    runtime: python
-    pythonVersion: "3.11"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python nashr_bot.py
