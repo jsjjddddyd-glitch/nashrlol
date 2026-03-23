@@ -2,6 +2,7 @@ import asyncio
 import logging
 import threading
 import os
+import io
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -37,6 +38,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8611830167:AAF6lR4rJ-_CiDmo68NfdOiQkLjiUg4OwCc"
+DEVELOPER_USERNAME = "c9aac"
 
 # States
 (
@@ -49,7 +51,8 @@ BOT_TOKEN = "8611830167:AAF6lR4rJ-_CiDmo68NfdOiQkLjiUg4OwCc"
     WAIT_INTERVAL,
     WAIT_MESSAGE,
     WAIT_GROUP_USERNAME,
-) = range(9)
+    WAIT_PHOTO,
+) = range(10)
 
 user_data_store = {}
 broadcast_tasks = {}
@@ -65,6 +68,7 @@ def init_user(user_id):
             "message": None,
             "group": None,
             "group_id": None,
+            "photo_file_id": None,
         }
 
 
@@ -72,10 +76,12 @@ def get_main_menu():
     keyboard = [
         [InlineKeyboardButton("⏱ الوقت بين الرسائل", callback_data="set_interval")],
         [InlineKeyboardButton("📝 الكليشة (نص الرسالة)", callback_data="set_message")],
+        [InlineKeyboardButton("🖼 إضافة صورة", callback_data="set_photo")],
         [InlineKeyboardButton("👥 اختيار المجموعة", callback_data="choose_group")],
         [InlineKeyboardButton("🔑 إضافة جلسة (Session)", callback_data="add_session")],
         [InlineKeyboardButton("🚀 بدء النشر", callback_data="start_broadcast")],
         [InlineKeyboardButton("⛔ إيقاف النشر", callback_data="stop_broadcast")],
+        [InlineKeyboardButton("👨‍💻 المطور", callback_data="developer")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -84,13 +90,15 @@ def get_status(user_id):
     d = user_data_store.get(user_id, {})
     session = "✅" if d.get("session_string") else "❌"
     interval = f"✅ {d.get('interval')} دقيقة" if d.get("interval") else "❌"
-    message = f"✅ محفوظة" if d.get("message") else "❌"
+    message = "✅ محفوظة" if d.get("message") else "❌"
     group = f"✅ {d.get('group')}" if d.get("group") else "❌"
+    photo = "✅ مضافة" if d.get("photo_file_id") else "❌"
     return (
         f"📊 *الحالة الحالية:*\n"
         f"🔑 الجلسة: {session}\n"
         f"⏱ الوقت: {interval}\n"
         f"📝 الكليشة: {message}\n"
+        f"🖼 الصورة: {photo}\n"
         f"👥 المجموعة: {group}"
     )
 
@@ -244,6 +252,77 @@ async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ─── زر إضافة الصورة ─────────────────────────────────────────────────────────
+async def set_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "🖼 أرسل الصورة التي تريد إرفاقها مع الكليشة في رسالة النشر:\n\n"
+        "ℹ️ سيتم إرسال الصورة والنص في رسالة واحدة."
+    )
+    context.user_data["waiting_for"] = "photo"
+    return WAIT_PHOTO
+
+
+async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not update.message.photo:
+        await update.message.reply_text("❌ يرجى إرسال صورة وليس ملفاً آخر. أرسل الصورة مجدداً:")
+        return WAIT_PHOTO
+
+    photo = update.message.photo[-1]
+    user_data_store[user_id]["photo_file_id"] = photo.file_id
+
+    await update.message.reply_text(
+        "✅ تم حفظ الصورة. ستُرسل مع الكليشة في رسالة واحدة.",
+        reply_markup=get_main_menu(),
+    )
+    context.user_data.pop("waiting_for", None)
+    return ConversationHandler.END
+
+
+# ─── زر المطور ───────────────────────────────────────────────────────────────
+async def developer_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("📩 تواصل مع المطور", url="https://t.me/c9aac")]]
+    await query.message.reply_text(
+        "👨‍💻 *المطور*\n\n"
+        "تم تطوير هذا البوت بواسطة:\n"
+        "🔗 @c9aac\n\n"
+        "للتواصل أو الاستفسار اضغط الزر أدناه:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return ConversationHandler.END
+
+
+# ─── أمر /info للمطور فقط ────────────────────────────────────────────────────
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.username != DEVELOPER_USERNAME:
+        await update.message.reply_text("❌ هذا الأمر للمطور فقط.")
+        return
+
+    total_users = len(user_data_store)
+    active_broadcasts = sum(
+        1 for task in broadcast_tasks.values() if not task.done()
+    )
+    configured_users = sum(
+        1 for d in user_data_store.values()
+        if d.get("session_string") and d.get("message") and d.get("group")
+    )
+
+    await update.message.reply_text(
+        "📊 *إحصائيات البوت*\n\n"
+        f"👥 إجمالي المستخدمين: `{total_users}`\n"
+        f"⚙️ مستخدمون مكتملو الإعداد: `{configured_users}`\n"
+        f"🚀 جلسات نشر نشطة الآن: `{active_broadcasts}`",
+        parse_mode="Markdown",
+    )
+
+
 # ─── زر اختيار المجموعة ──────────────────────────────────────────────────────
 async def choose_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -335,11 +414,13 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⚠️ النشر يعمل بالفعل!")
         return ConversationHandler.END
 
+    photo_info = "مع صورة 🖼" if data.get("photo_file_id") else "بدون صورة"
     await query.message.reply_text(
         f"🚀 بدأ النشر!\n\n"
         f"📍 المجموعة: {data['group']}\n"
         f"⏱ كل: {data['interval']} دقيقة\n"
-        f"📝 الرسالة: {str(data['message'])[:50]}"
+        f"📝 الرسالة: {str(data['message'])[:50]}\n"
+        f"🖼 الصورة: {photo_info}"
     )
 
     task = asyncio.create_task(
@@ -351,6 +432,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["group_username"],
             data["message"],
             data["interval"],
+            data.get("photo_file_id"),
             context,
         )
     )
@@ -373,7 +455,7 @@ async def stop_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── حلقة النشر ──────────────────────────────────────────────────────────────
-async def broadcast_loop(user_id, api_id, api_hash, session, group_username, message, interval_minutes, context):
+async def broadcast_loop(user_id, api_id, api_hash, session, group_username, message, interval_minutes, photo_file_id, context):
     bot = context.application.bot
     interval_seconds = interval_minutes * 60
 
@@ -389,7 +471,19 @@ async def broadcast_loop(user_id, api_id, api_hash, session, group_username, mes
 
         while True:
             try:
-                await client.send_message(group_username, message)
+                if photo_file_id:
+                    tg_file = await bot.get_file(photo_file_id)
+                    photo_bytes = await tg_file.download_as_bytearray()
+                    photo_io = io.BytesIO(bytes(photo_bytes))
+                    photo_io.name = "photo.jpg"
+                    await client.send_file(
+                        group_username,
+                        photo_io,
+                        caption=message,
+                    )
+                else:
+                    await client.send_message(group_username, message)
+
                 await bot.send_message(user_id, "✅ تم إرسال رسالة.")
             except Exception as e:
                 await bot.send_message(user_id, f"❌ فشل الإرسال: {str(e)}")
@@ -421,9 +515,11 @@ def main():
             CallbackQueryHandler(add_session_start, pattern="^add_session$"),
             CallbackQueryHandler(set_interval_start, pattern="^set_interval$"),
             CallbackQueryHandler(set_message_start, pattern="^set_message$"),
+            CallbackQueryHandler(set_photo_start, pattern="^set_photo$"),
             CallbackQueryHandler(choose_group_start, pattern="^choose_group$"),
             CallbackQueryHandler(start_broadcast, pattern="^start_broadcast$"),
             CallbackQueryHandler(stop_broadcast, pattern="^stop_broadcast$"),
+            CallbackQueryHandler(developer_info, pattern="^developer$"),
         ],
         states={
             ASK_API_ID_SESSION: [
@@ -444,15 +540,21 @@ def main():
             WAIT_GROUP_USERNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_group_username)
             ],
+            WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_photo),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_photo),
+            ],
         },
         fallbacks=[
             CommandHandler("start", start),
             CallbackQueryHandler(add_session_start, pattern="^add_session$"),
             CallbackQueryHandler(set_interval_start, pattern="^set_interval$"),
             CallbackQueryHandler(set_message_start, pattern="^set_message$"),
+            CallbackQueryHandler(set_photo_start, pattern="^set_photo$"),
             CallbackQueryHandler(choose_group_start, pattern="^choose_group$"),
             CallbackQueryHandler(start_broadcast, pattern="^start_broadcast$"),
             CallbackQueryHandler(stop_broadcast, pattern="^stop_broadcast$"),
+            CallbackQueryHandler(developer_info, pattern="^developer$"),
         ],
         per_user=True,
         per_chat=True,
@@ -460,6 +562,7 @@ def main():
     )
 
     app.add_handler(conv)
+    app.add_handler(CommandHandler("info", info_command))
 
     print("✅ البوت يعمل الآن...")
     app.run_polling()
