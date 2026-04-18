@@ -808,10 +808,39 @@ def is_photo_forbidden_error(error):
     )
 
 
+def build_live_broadcast_text(round_number, total_groups, current_group, success_count, text_only_count, fail_count, status):
+    current_group_text = current_group or "بانتظار بدء الجولة"
+    return (
+        f"📡 حالة النشر المباشر\n\n"
+        f"🔁 الجولة: {round_number}\n"
+        f"📍 المجموعة الحالية: {current_group_text}\n"
+        f"👥 إجمالي المجموعات: {total_groups}\n\n"
+        f"✅ نجح: {success_count}\n"
+        f"⚠️ نص فقط: {text_only_count}\n"
+        f"❌ فشل: {fail_count}\n\n"
+        f"🟢 الحالة: {status}"
+    )
+
+
+async def update_live_broadcast_message(bot, user_id, live_message, text):
+    try:
+        await bot.edit_message_text(
+            chat_id=user_id,
+            message_id=live_message.message_id,
+            text=text,
+        )
+        return live_message
+    except Exception:
+        return live_message
+
+
 # ─── حلقة النشر ──────────────────────────────────────────────────────────────
 async def broadcast_loop(user_id, api_id, api_hash, session, groups, message, interval_minutes, photo_file_id, context):
     bot = context.application.bot
     interval_seconds = interval_minutes * 60
+    client = None
+    live_message = None
+    round_number = 0
 
     try:
         client = TelegramClient(
@@ -823,17 +852,40 @@ async def broadcast_loop(user_id, api_id, api_hash, session, groups, message, in
         )
         await client.connect()
 
+        live_message = await bot.send_message(
+            user_id,
+            build_live_broadcast_text(0, len(groups), None, 0, 0, 0, "تم تشغيل النشر"),
+        )
+
         while True:
+            round_number += 1
             success_count = 0
             text_only_count = 0
             fail_count = 0
             photo_bytes = None
+
+            await update_live_broadcast_message(
+                bot,
+                user_id,
+                live_message,
+                build_live_broadcast_text(round_number, len(groups), None, success_count, text_only_count, fail_count, "جاري تجهيز الجولة"),
+            )
 
             if photo_file_id:
                 tg_file = await bot.get_file(photo_file_id)
                 photo_bytes = bytes(await tg_file.download_as_bytearray())
 
             for group in groups:
+                group_name = group.get("name", "مجموعة")
+                status = "جاري الإرسال"
+
+                await update_live_broadcast_message(
+                    bot,
+                    user_id,
+                    live_message,
+                    build_live_broadcast_text(round_number, len(groups), group_name, success_count, text_only_count, fail_count, status),
+                )
+
                 try:
                     target_entity = await resolve_saved_group(client, group)
 
@@ -843,41 +895,69 @@ async def broadcast_loop(user_id, api_id, api_hash, session, groups, message, in
                         try:
                             await client.send_file(target_entity, photo_io, caption=message)
                             success_count += 1
+                            status = "تم الإرسال مع الصورة"
                         except Exception as photo_error:
                             if is_photo_forbidden_error(photo_error):
                                 await client.send_message(target_entity, message)
                                 success_count += 1
                                 text_only_count += 1
-                                await bot.send_message(
-                                    user_id,
-                                    f"⚠️ مجموعة {group['name']} تمنع الصور، تم إرسال النص فقط."
-                                )
+                                status = "المجموعة تمنع الصور، تم إرسال النص فقط"
                             else:
                                 raise photo_error
                     else:
                         await client.send_message(target_entity, message)
                         success_count += 1
+                        status = "تم إرسال النص"
                 except Exception as e:
                     fail_count += 1
-                    await bot.send_message(user_id, f"❌ فشل الإرسال لـ {group['name']}: {str(e)}")
+                    error_text = str(e)
+                    if len(error_text) > 90:
+                        error_text = error_text[:90] + "..."
+                    status = f"فشل الإرسال: {error_text}"
 
-            summary = f"📬 جولة نشر مكتملة:\n✅ نجح: {success_count} | ❌ فشل: {fail_count}"
-            if text_only_count:
-                summary += f"\n⚠️ أُرسل كنص فقط في: {text_only_count} مجموعة لأنها تمنع الصور"
+                await update_live_broadcast_message(
+                    bot,
+                    user_id,
+                    live_message,
+                    build_live_broadcast_text(round_number, len(groups), group_name, success_count, text_only_count, fail_count, status),
+                )
 
-            await bot.send_message(user_id, summary)
+            summary_status = f"اكتملت الجولة، الجولة التالية بعد {interval_minutes} دقيقة"
+            await update_live_broadcast_message(
+                bot,
+                user_id,
+                live_message,
+                build_live_broadcast_text(round_number, len(groups), "تمت كل المجموعات", success_count, text_only_count, fail_count, summary_status),
+            )
             await asyncio.sleep(interval_seconds)
 
     except asyncio.CancelledError:
         try:
-            await client.disconnect()
+            if client:
+                await client.disconnect()
         except:
             pass
-        await bot.send_message(user_id, "⛔ تم إيقاف النشر التلقائي.")
+
+        if live_message:
+            await update_live_broadcast_message(
+                bot,
+                user_id,
+                live_message,
+                build_live_broadcast_text(round_number, len(groups), "متوقف", 0, 0, 0, "تم إيقاف النشر التلقائي"),
+            )
+        else:
+            await bot.send_message(user_id, "⛔ تم إيقاف النشر التلقائي.")
 
     except Exception as e:
-        await bot.send_message(user_id, f"❌ خطأ في النشر: {str(e)}")
-
+        if live_message:
+            await update_live_broadcast_message(
+                bot,
+                user_id,
+                live_message,
+                build_live_broadcast_text(round_number, len(groups), "خطأ", 0, 0, 0, f"خطأ في النشر: {str(e)}"),
+            )
+        else:
+            await bot.send_message(user_id, f"❌ خطأ في النشر: {str(e)}")
 
 # ─── main ─────────────────────────────────────────────────────────────────────
 def main():
